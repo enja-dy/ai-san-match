@@ -1,14 +1,14 @@
 // ===============================================
 // AIさん 出会い・マッチング版（LINE Bot）
-// ・恋愛相談 / 出会いアドバイスに特化
-// ・丁寧・優しい・寄り添う会話スタイル
-// ・検索が必要な内容は簡易調査（SerpAPI 無し版）
-// ・画像解析なし（必要なら後で追加します）
+// ・恋愛相談/記憶/寄り添いに特化
+// ・Supabase にユーザーの恋愛情報を保存
+// ・優しく柔らかい“お姉さんAI”
 // ===============================================
 
 import express from "express";
 import * as line from "@line/bot-sdk";
 import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js";
 
 /* ========= LINE ========= */
 const config = {
@@ -22,10 +22,14 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+/* ========= Supabase ========= */
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE
+);
+
 /* ========= Server ========= */
 const app = express();
-
-// Health check
 app.get("/", (_req, res) => res.send("AI-san (match) running"));
 
 /* ========= Webhook ========= */
@@ -33,60 +37,105 @@ app.post("/callback", line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events ?? [];
     await Promise.all(events.map(handleEvent));
-    return res.status(200).end();
   } catch (e) {
-    console.error("Webhook error:", e);
-    return res.status(200).end();
+    console.error(e);
   }
+  res.status(200).end();
 });
 
-/* ========= Core Event Handler ========= */
+/* ========= MAIN HANDLER ========= */
 async function handleEvent(event) {
-  if (event.type !== "message" || event.message.type !== "text") {
-    return;
-  }
+  if (event.type !== "message" || event.message.type !== "text") return;
 
+  const lineUserId = event.source.userId;
   const userMessage = event.message.text;
 
-  const replyText = await generateReply(userMessage);
+  // ① Supabase からユーザー情報を取得 or 作成
+  const userData = await loadOrCreateUser(lineUserId);
 
+  // ② AI返答を生成（過去記憶つき）
+  const aiText = await generateReply(userMessage, userData);
+
+  // ③ 最新の相談内容を保存
+  await updateLastMessage(lineUserId, userMessage);
+
+  // ④ LINE へ返信
   return lineClient.replyMessage(event.replyToken, {
     type: "text",
-    text: replyText,
+    text: aiText,
   });
 }
 
-/* ========= AI Response Logic ========= */
-async function generateReply(userMessage) {
+/* ========= Load or Create User ========= */
+async function loadOrCreateUser(lineUserId) {
+  const { data, error } = await supabase
+    .from("users_match")
+    .select("*")
+    .eq("line_user_id", lineUserId)
+    .single();
+
+  if (data) return data;
+
+  // 新規作成
+  const { data: newUser } = await supabase
+    .from("users_match")
+    .insert({
+      line_user_id: lineUserId,
+      love_status: null,
+      love_target: null,
+      personality: null,
+      last_message: null,
+    })
+    .select()
+    .single();
+
+  return newUser;
+}
+
+/* ========= Update: Save last message ========= */
+async function updateLastMessage(lineUserId, message) {
+  await supabase
+    .from("users_match")
+    .update({
+      last_message: message,
+      updated_at: new Date(),
+    })
+    .eq("line_user_id", lineUserId);
+}
+
+/* ========= AI Reply (memory-based) ========= */
+async function generateReply(userMessage, userData) {
   try {
+    const memoryText = `
+【あなたの過去の相談情報】
+- 好きな人：${userData.love_target ?? "未登録"}
+- 恋愛状況：${userData.love_status ?? "まだ情報がありません"}
+- あなたの性格：${userData.personality ?? "まだ情報がありません"}
+- 最近の相談内容：${userData.last_message ?? "なし"}
+
+【今回の相談】
+${userMessage}
+`;
+
     const prompt = `
-あなたは優しく寄り添う女性AIアシスタント「AIさん」です。
-テーマは「恋愛・出会い・マッチング」に特化しています。
+あなたは「AIさん」。
+恋愛相談に優しく寄り添い、ユーザーの気持ちを否定しません。
+過去の相談内容も覚えて、自然に反映します。
 
-◆ あなたの性格
-- 優しい
-- 共感する
-- 否定しない
-- フレンドリー
-- 笑顔で寄り添う
-- 少しだけ恋バナが得意な“頼れるお姉さん”
-
-◆ 返答ルール
-1. 必ず「優しく共感」→「具体的アドバイス」→「次の一言」の3段階で返す  
-2. 文章の長さは 3〜5 行ほど  
-3. 重すぎず軽すぎず、恋愛相談の温度感  
-4. 語尾はやわらかく  
-5. 相手を励ます言い回しを多めにする
+◆ 返答スタイル
+1. 最初に共感
+2. 次に優しいアドバイス
+3. 最後に軽い一言（次を促す）
 
 ◆ NG
-- 断定的な決めつけ（例：「絶対こうすべき」）
-- 攻撃的な言い方
-- 医療・法律判断
+- 医療判断
+- 個人特定
+- 断定しすぎ
 
-◆ ユーザーの発言:
-「${userMessage}」
+【記憶データ】
+${memoryText}
 
-これに対して、AIさんとして最適な返答を作ってください。
+この情報をふまえて、AIさんとして最適な返答を作ってください。
 `;
 
     const completion = await openai.chat.completions.create({
@@ -100,7 +149,7 @@ async function generateReply(userMessage) {
     return completion.choices[0].message.content.trim();
   } catch (err) {
     console.error("OpenAI Error:", err);
-    return "ごめんね…少し混み合ってるみたい。もう一度送ってくれる？🥺";
+    return "少し混み合ってるみたい…もう一度送ってくれる？🥺";
   }
 }
 
