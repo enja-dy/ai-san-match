@@ -1,0 +1,15 @@
+{
+  "name": "ai-san-match",
+  "version": "1.0.0",
+  "description": "AIさん 出会い・マッチング LINE Bot",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^7.5.2",
+    "express": "^4.18.2",
+    "openai": "^4.52.0"
+  }
+}
